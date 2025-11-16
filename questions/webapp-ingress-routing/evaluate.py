@@ -8,7 +8,7 @@ import json
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import Any, List, Sequence
+from typing import Any, Callable, List, Sequence
 
 NAMESPACE = "ingress-ns"
 INGRESS_NAME = "webapp-ingress"
@@ -37,11 +37,14 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def run_kubectl_json(args: argparse.Namespace, cmd: Sequence[str]) -> Any:
+def run_kubectl_json(
+    args: argparse.Namespace, cmd: Sequence[str], namespace: str | None = None
+) -> Any:
     command = ["kubectl"]
     if args.kubeconfig:
         command.extend(["--kubeconfig", args.kubeconfig])
-    command.extend(["-n", NAMESPACE])
+    if namespace:
+        command.extend(["-n", namespace])
     command.extend(cmd)
     command.extend(["-o", "json"])
 
@@ -53,50 +56,131 @@ def run_kubectl_json(args: argparse.Namespace, cmd: Sequence[str]) -> Any:
     return json.loads(result.stdout)
 
 
-def validate_ingress(args: argparse.Namespace) -> None:
-    ingress = run_kubectl_json(args, ["get", "ingress", INGRESS_NAME])
-    spec = ingress.get("spec", {})
-    rules = spec.get("rules", [])
-    if not rules:
-        raise CheckError("Ingress must define at least one rule")
+def ensure_namespace_exists(args: argparse.Namespace, namespace: str) -> None:
+    run_kubectl_json(args, ["get", "namespace", namespace])
 
-    host_rule = next((rule for rule in rules if rule.get("host") == EXPECTED_HOST), None)
-    if not host_rule:
-        raise CheckError(f"Ingress must define a rule for host '{EXPECTED_HOST}'")
 
-    http_rule = host_rule.get("http") or {}
-    paths = http_rule.get("paths", [])
-    matching_path = None
-    for path in paths:
-        if path.get("path") == EXPECTED_PATH and path.get("pathType") == EXPECTED_PATHTYPE:
-            matching_path = path
-            break
+def ensure_equal(actual: Any, expected: Any, message: str) -> None:
+    if actual != expected:
+        raise CheckError(f"{message}: expected {expected!r}, got {actual!r}")
 
-    if not matching_path:
-        raise CheckError(
-            f"Host rule must include path '{EXPECTED_PATH}' with pathType '{EXPECTED_PATHTYPE}'"
+
+class CheckReporter:
+    """Utility for printing status information for each check."""
+
+    SUCCESS_ICON = "\033[92m✔\033[0m"
+    FAILURE_ICON = "\033[91m✘\033[0m"
+
+    def check(self, description: str, func: Callable[[], None]) -> None:
+        try:
+            func()
+        except Exception as exc:
+            print(f"{self.FAILURE_ICON} {description}: failed ({exc})")
+            raise
+        else:
+            print(f"{self.SUCCESS_ICON} {description}: succeeded")
+
+
+def validate_ingress(args: argparse.Namespace, reporter: CheckReporter) -> None:
+    ingress: dict[str, Any] | None = None
+    host_rule: dict[str, Any] | None = None
+    matching_path: dict[str, Any] | None = None
+    backend_service: dict[str, Any] | None = None
+
+    reporter.check(
+        f"Namespace '{NAMESPACE}' exists",
+        lambda: ensure_namespace_exists(args, NAMESPACE),
+    )
+
+    def fetch_ingress() -> None:
+        nonlocal ingress
+        ingress = run_kubectl_json(
+            args, ["get", "ingress", INGRESS_NAME], namespace=NAMESPACE
         )
 
-    backend = matching_path.get("backend", {}).get("service")
-    if not backend:
-        raise CheckError("Ingress path must forward to a backend Service")
+    reporter.check(f"Ingress '{INGRESS_NAME}' exists", fetch_ingress)
 
-    service_name = backend.get("name")
-    if service_name != EXPECTED_SERVICE:
-        raise CheckError(
-            f"Ingress must point to Service '{EXPECTED_SERVICE}' (found: '{service_name}')"
+    def ensure_host_rule() -> None:
+        nonlocal host_rule
+        if ingress is None:
+            raise CheckError("Ingress resource is unavailable")
+        spec = ingress.get("spec", {})
+        rules = spec.get("rules", [])
+        if not rules:
+            raise CheckError("Ingress must define at least one rule")
+        host_rule = next((rule for rule in rules if rule.get("host") == EXPECTED_HOST), None)
+        if not host_rule:
+            raise CheckError(f"Ingress must define a rule for host '{EXPECTED_HOST}'")
+
+    reporter.check(
+        f"Ingress defines host rule for '{EXPECTED_HOST}'",
+        ensure_host_rule,
+    )
+
+    def ensure_path_rule() -> None:
+        nonlocal matching_path
+        if host_rule is None:
+            raise CheckError("Host rule is unavailable")
+        http_rule = host_rule.get("http") or {}
+        paths = http_rule.get("paths", [])
+        matching_path = next(
+            (
+                path
+                for path in paths
+                if path.get("path") == EXPECTED_PATH
+                and path.get("pathType") == EXPECTED_PATHTYPE
+            ),
+            None,
+        )
+        if not matching_path:
+            raise CheckError(
+                f"Host rule must include path '{EXPECTED_PATH}' with pathType '{EXPECTED_PATHTYPE}'"
+            )
+
+    reporter.check(
+        f"Host rule routes path '{EXPECTED_PATH}' with pathType '{EXPECTED_PATHTYPE}'",
+        ensure_path_rule,
+    )
+
+    def ensure_backend_service() -> None:
+        nonlocal backend_service
+        if matching_path is None:
+            raise CheckError("Ingress path definition is unavailable")
+        backend_service = matching_path.get("backend", {}).get("service")
+        if not backend_service:
+            raise CheckError("Ingress path must forward to a backend Service")
+        service_name = backend_service.get("name")
+        ensure_equal(
+            service_name,
+            EXPECTED_SERVICE,
+            f"Ingress must point to Service '{EXPECTED_SERVICE}'",
         )
 
-    port_info = backend.get("port", {})
-    port_number = port_info.get("number")
-    if port_number != EXPECTED_SERVICE_PORT:
-        raise CheckError(
-            f"Ingress backend must use Service port {EXPECTED_SERVICE_PORT} (found: {port_number})"
+    reporter.check(
+        f"Ingress routes traffic to Service '{EXPECTED_SERVICE}'",
+        ensure_backend_service,
+    )
+
+    def ensure_backend_port() -> None:
+        if backend_service is None:
+            raise CheckError("Ingress backend service is unavailable")
+        port_info = backend_service.get("port", {})
+        port_number = port_info.get("number")
+        ensure_equal(
+            port_number,
+            EXPECTED_SERVICE_PORT,
+            f"Ingress backend must use Service port {EXPECTED_SERVICE_PORT}",
         )
+
+    reporter.check(
+        f"Ingress backend uses Service port {EXPECTED_SERVICE_PORT}",
+        ensure_backend_port,
+    )
 
 
 def run_checks(args: argparse.Namespace) -> None:
-    validate_ingress(args)
+    reporter = CheckReporter()
+    validate_ingress(args, reporter)
 
 
 def main(argv: List[str] | None = None) -> int:
