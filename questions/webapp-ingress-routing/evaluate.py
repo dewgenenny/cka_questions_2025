@@ -58,6 +58,29 @@ def validate_ingress(args: argparse.Namespace, reporter: CheckReporter) -> None:
 
     reporter.check(f"Ingress '{INGRESS_NAME}' exists", fetch_ingress)
 
+    def ensure_no_path_rewrite() -> None:
+        if ingress is None:
+            raise CheckError("Ingress resource is unavailable")
+        metadata = ingress.get("metadata") or {}
+        annotations = metadata.get("annotations") or {}
+        rewrite_keys = [
+            "nginx.ingress.kubernetes.io/rewrite-target",
+            "nginx.ingress.kubernetes.io/rewrite_target",
+        ]
+        for key in rewrite_keys:
+            value = annotations.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                value = value.strip()
+            if value:
+                raise CheckError(
+                    "Ingress rule must not rewrite the path; remove the"
+                    f" '{key}' annotation or leave it empty"
+                )
+
+    reporter.check("Ingress rule leaves request paths unchanged", ensure_no_path_rewrite)
+
     def ensure_host_rule() -> None:
         nonlocal host_rule
         if ingress is None:
