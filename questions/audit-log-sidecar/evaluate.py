@@ -69,6 +69,37 @@ def has_volume_mount(container: dict, volume_name: str, mount_path: str) -> bool
     return False
 
 
+def container_command(container: dict) -> List[str]:
+    """Return the effective container command (entrypoint + args)."""
+
+    command = container.get("command") or []
+    args = container.get("args") or []
+    return list(command) + list(args)
+
+
+def normalize_command_tokens(command: Sequence[str]) -> List[str]:
+    """Normalize shell command tokens for easier comparison."""
+
+    normalized: List[str] = []
+    for token in command:
+        value = token.strip()
+        if value in {"/bin/sh", "sh"}:
+            normalized.append("sh")
+            continue
+        normalized.append(" ".join(value.split()))
+    return normalized
+
+
+def ensure_command(container: dict, expected: Sequence[str], message: str) -> None:
+    actual_command = container_command(container)
+    normalized_actual = normalize_command_tokens(actual_command)
+    normalized_expected = normalize_command_tokens(expected)
+    if normalized_actual != normalized_expected:
+        raise CheckError(
+            f"{message}: expected {list(expected)!r}, got {actual_command!r}"
+        )
+
+
 def validate_deployment(args: argparse.Namespace) -> None:
     namespace = "observability-ns"
     deployment_name = "audit-stream"
@@ -92,8 +123,8 @@ def validate_deployment(args: argparse.Namespace) -> None:
     tail_agent = find_container(containers, "tail-agent")
 
     ensure_equal(writer.get("image"), "busybox", "audit-writer must use the busybox image")
-    ensure_equal(
-        writer.get("command"),
+    ensure_command(
+        writer,
         ["sh", "-c", "while true; do date >> /var/audit/audit.log; sleep 3; done"],
         "audit-writer command is incorrect",
     )
@@ -101,8 +132,8 @@ def validate_deployment(args: argparse.Namespace) -> None:
         raise CheckError("audit-writer must mount volume 'audit-storage' at /var/audit")
 
     ensure_equal(tail_agent.get("image"), "busybox", "tail-agent must use the busybox image")
-    ensure_equal(
-        tail_agent.get("command"),
+    ensure_command(
+        tail_agent,
         ["sh", "-c", "tail -n+1 -f /var/audit/audit.log"],
         "tail-agent command is incorrect",
     )
