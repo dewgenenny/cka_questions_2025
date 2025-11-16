@@ -8,7 +8,7 @@ import json
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import Any, List, Sequence
+from typing import Any, Callable, List, Sequence
 
 
 @dataclass
@@ -104,49 +104,132 @@ def ensure_command(container: dict, expected: Sequence[str], message: str) -> No
         )
 
 
-def validate_deployment(args: argparse.Namespace) -> None:
+class CheckReporter:
+    """Utility for printing status information for each check."""
+
+    SUCCESS_ICON = "\033[92m✔\033[0m"
+    FAILURE_ICON = "\033[91m✘\033[0m"
+
+    def check(self, description: str, func: Callable[[], None]) -> None:
+        try:
+            func()
+        except Exception as exc:
+            print(f"{self.FAILURE_ICON} {description}: failed ({exc})")
+            raise
+        else:
+            print(f"{self.SUCCESS_ICON} {description}: succeeded")
+
+
+def validate_deployment(args: argparse.Namespace, reporter: CheckReporter) -> None:
     namespace = "observability-ns"
     deployment_name = "audit-stream"
-    ensure_namespace_exists(args, namespace)
+    deployment: dict[str, Any] | None = None
+    pod_spec: dict[str, Any] | None = None
+    writer: dict[str, Any] | None = None
+    tail_agent: dict[str, Any] | None = None
 
-    deployment = run_kubectl_json(args, ["get", "deployment", deployment_name], namespace=namespace)
-
-    replicas = deployment.get("spec", {}).get("replicas")
-    ensure_equal(replicas, 1, "Deployment must have exactly 1 replica")
-
-    pod_spec = deployment.get("spec", {}).get("template", {}).get("spec", {})
-    volumes = pod_spec.get("volumes", [])
-    audit_volume = next((vol for vol in volumes if vol.get("name") == "audit-storage"), None)
-    if not audit_volume:
-        raise CheckError("Pod template must define an emptyDir volume named 'audit-storage'")
-    if "emptyDir" not in audit_volume:
-        raise CheckError("Volume 'audit-storage' must be of type emptyDir")
-
-    containers = pod_spec.get("containers", [])
-    writer = find_container(containers, "audit-writer")
-    tail_agent = find_container(containers, "tail-agent")
-
-    ensure_equal(writer.get("image"), "busybox", "audit-writer must use the busybox image")
-    ensure_command(
-        writer,
-        ["sh", "-c", "while true; do date >> /var/audit/audit.log; sleep 3; done"],
-        "audit-writer command is incorrect",
+    reporter.check(
+        "Namespace 'observability-ns' exists",
+        lambda: ensure_namespace_exists(args, namespace),
     )
-    if not has_volume_mount(writer, "audit-storage", "/var/audit"):
-        raise CheckError("audit-writer must mount volume 'audit-storage' at /var/audit")
 
-    ensure_equal(tail_agent.get("image"), "busybox", "tail-agent must use the busybox image")
-    ensure_command(
-        tail_agent,
-        ["sh", "-c", "tail -n+1 -f /var/audit/audit.log"],
-        "tail-agent command is incorrect",
-    )
-    if not has_volume_mount(tail_agent, "audit-storage", "/var/audit"):
-        raise CheckError("tail-agent must mount volume 'audit-storage' at /var/audit")
+    def fetch_deployment() -> None:
+        nonlocal deployment, pod_spec
+        deployment = run_kubectl_json(
+            args, ["get", "deployment", deployment_name], namespace=namespace
+        )
+        pod_spec = deployment.get("spec", {}).get("template", {}).get("spec", {})
+        if not isinstance(pod_spec, dict):
+            raise CheckError("Deployment is missing a pod template spec")
+
+    reporter.check(f"Deployment '{deployment_name}' exists", fetch_deployment)
+
+    def check_replicas() -> None:
+        if deployment is None:
+            raise CheckError("Deployment has not been loaded")
+        replicas = deployment.get("spec", {}).get("replicas")
+        ensure_equal(replicas, 1, "Deployment must have exactly 1 replica")
+
+    reporter.check("Deployment has exactly 1 replica", check_replicas)
+
+    def check_audit_volume() -> None:
+        if pod_spec is None:
+            raise CheckError("Pod spec is unavailable")
+        volumes = pod_spec.get("volumes", [])
+        audit_volume = next((vol for vol in volumes if vol.get("name") == "audit-storage"), None)
+        if not audit_volume:
+            raise CheckError("Pod template must define an emptyDir volume named 'audit-storage'")
+        if "emptyDir" not in audit_volume:
+            raise CheckError("Volume 'audit-storage' must be of type emptyDir")
+
+    reporter.check("Pod template defines emptyDir volume 'audit-storage'", check_audit_volume)
+
+    def ensure_containers_exist() -> None:
+        nonlocal writer, tail_agent
+        if pod_spec is None:
+            raise CheckError("Pod spec is unavailable")
+        containers = pod_spec.get("containers", [])
+        writer = find_container(containers, "audit-writer")
+        tail_agent = find_container(containers, "tail-agent")
+
+    reporter.check("Pod template defines audit-writer and tail-agent containers", ensure_containers_exist)
+
+    def writer_image() -> None:
+        if writer is None:
+            raise CheckError("audit-writer container not found")
+        ensure_equal(writer.get("image"), "busybox", "audit-writer must use the busybox image")
+
+    reporter.check("audit-writer uses the busybox image", writer_image)
+
+    def writer_command() -> None:
+        if writer is None:
+            raise CheckError("audit-writer container not found")
+        ensure_command(
+            writer,
+            ["sh", "-c", "while true; do date >> /var/audit/audit.log; sleep 3; done"],
+            "audit-writer command is incorrect",
+        )
+
+    reporter.check("audit-writer writes audit events in a loop", writer_command)
+
+    def writer_volume() -> None:
+        if writer is None:
+            raise CheckError("audit-writer container not found")
+        if not has_volume_mount(writer, "audit-storage", "/var/audit"):
+            raise CheckError("audit-writer must mount volume 'audit-storage' at /var/audit")
+
+    reporter.check("audit-writer mounts audit-storage at /var/audit", writer_volume)
+
+    def tail_image() -> None:
+        if tail_agent is None:
+            raise CheckError("tail-agent container not found")
+        ensure_equal(tail_agent.get("image"), "busybox", "tail-agent must use the busybox image")
+
+    reporter.check("tail-agent uses the busybox image", tail_image)
+
+    def tail_command() -> None:
+        if tail_agent is None:
+            raise CheckError("tail-agent container not found")
+        ensure_command(
+            tail_agent,
+            ["sh", "-c", "tail -n+1 -f /var/audit/audit.log"],
+            "tail-agent command is incorrect",
+        )
+
+    reporter.check("tail-agent streams the audit log", tail_command)
+
+    def tail_volume() -> None:
+        if tail_agent is None:
+            raise CheckError("tail-agent container not found")
+        if not has_volume_mount(tail_agent, "audit-storage", "/var/audit"):
+            raise CheckError("tail-agent must mount volume 'audit-storage' at /var/audit")
+
+    reporter.check("tail-agent mounts audit-storage at /var/audit", tail_volume)
 
 
 def run_checks(args: argparse.Namespace) -> None:
-    validate_deployment(args)
+    reporter = CheckReporter()
+    validate_deployment(args, reporter)
 
 
 def main(argv: List[str] | None = None) -> int:
