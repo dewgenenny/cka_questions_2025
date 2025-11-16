@@ -4,11 +4,21 @@
 from __future__ import annotations
 
 import argparse
-import json
-import subprocess
 import sys
-from dataclasses import dataclass
-from typing import Any, Callable, List, Sequence
+from pathlib import Path
+from typing import Any, List, Sequence
+
+QUESTIONS_DIR = Path(__file__).resolve().parents[1]
+if str(QUESTIONS_DIR) not in sys.path:
+    sys.path.insert(0, str(QUESTIONS_DIR))
+
+from lib.checks import (  # noqa: E402
+    CheckError,
+    CheckReporter,
+    ensure_equal,
+    ensure_namespace_exists,
+    run_kubectl_json,
+)
 
 NAMESPACE = "ingress-ns"
 INGRESS_NAME = "webapp-ingress"
@@ -19,14 +29,6 @@ EXPECTED_PATHTYPE = "Prefix"
 EXPECTED_SERVICE_PORT = 80
 
 
-@dataclass
-class CheckError(Exception):
-    message: str
-
-    def __str__(self) -> str:  # pragma: no cover - trivial
-        return self.message
-
-
 def parse_args(argv: List[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate the webapp ingress configuration")
     parser.add_argument(
@@ -35,50 +37,6 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         help="Path to the kubeconfig file (defaults to $KUBECONFIG or ~/.kube/config)",
     )
     return parser.parse_args(argv)
-
-
-def run_kubectl_json(
-    args: argparse.Namespace, cmd: Sequence[str], namespace: str | None = None
-) -> Any:
-    command = ["kubectl"]
-    if args.kubeconfig:
-        command.extend(["--kubeconfig", args.kubeconfig])
-    if namespace:
-        command.extend(["-n", namespace])
-    command.extend(cmd)
-    command.extend(["-o", "json"])
-
-    result = subprocess.run(command, check=False, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise CheckError(
-            f"kubectl command failed (cmd={' '.join(command)}): {result.stderr.strip() or result.stdout.strip()}"
-        )
-    return json.loads(result.stdout)
-
-
-def ensure_namespace_exists(args: argparse.Namespace, namespace: str) -> None:
-    run_kubectl_json(args, ["get", "namespace", namespace])
-
-
-def ensure_equal(actual: Any, expected: Any, message: str) -> None:
-    if actual != expected:
-        raise CheckError(f"{message}: expected {expected!r}, got {actual!r}")
-
-
-class CheckReporter:
-    """Utility for printing status information for each check."""
-
-    SUCCESS_ICON = "\033[92m✔\033[0m"
-    FAILURE_ICON = "\033[91m✘\033[0m"
-
-    def check(self, description: str, func: Callable[[], None]) -> None:
-        try:
-            func()
-        except Exception as exc:
-            print(f"{self.FAILURE_ICON} {description}: failed ({exc})")
-            raise
-        else:
-            print(f"{self.SUCCESS_ICON} {description}: succeeded")
 
 
 def validate_ingress(args: argparse.Namespace, reporter: CheckReporter) -> None:
@@ -181,6 +139,7 @@ def validate_ingress(args: argparse.Namespace, reporter: CheckReporter) -> None:
 def run_checks(args: argparse.Namespace) -> None:
     reporter = CheckReporter()
     validate_ingress(args, reporter)
+    reporter.raise_for_failures()
 
 
 def main(argv: List[str] | None = None) -> int:
