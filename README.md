@@ -32,3 +32,8 @@ guidance on how to contribute new questions.
 
 Once the structure is in place, individual questions can be added via pull
 requests following the same conventions.
+
+## Available Practice Scenarios
+
+- [Audit Log Sidecar Streaming](questions/audit-log-sidecar/README.md)
+- [Web App Ingress Routing](questions/webapp-ingress-routing/README.md)
