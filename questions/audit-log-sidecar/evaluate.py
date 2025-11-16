@@ -86,7 +86,11 @@ def normalize_command_tokens(command: Sequence[str]) -> List[str]:
         if value in {"/bin/sh", "sh"}:
             normalized.append("sh")
             continue
-        normalized.append(" ".join(value.split()))
+        collapsed = " ".join(value.split())
+        if ";" in collapsed:
+            segments = [segment.strip() for segment in collapsed.split(";")]
+            collapsed = "; ".join(segment for segment in segments if segment)
+        normalized.append(collapsed)
     return normalized
 
 
