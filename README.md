@@ -37,3 +37,4 @@ requests following the same conventions.
 
 - [Audit Log Sidecar Streaming](questions/audit-log-sidecar/README.md)
 - [Web App Ingress Routing](questions/webapp-ingress-routing/README.md)
+- [Nginx DNS Resolver Checks](questions/nginx-dns-resolution/README.md)
