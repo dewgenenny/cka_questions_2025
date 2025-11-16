@@ -9,7 +9,14 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from typing import List
+
+QUESTIONS_DIR = Path(__file__).resolve().parents[1]
+if str(QUESTIONS_DIR) not in sys.path:
+    sys.path.insert(0, str(QUESTIONS_DIR))
+
+from lib.checks import CheckError, CheckReporter  # noqa: E402
 
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
@@ -31,15 +38,22 @@ def run_checks(args: argparse.Namespace) -> None:
       * Perform HTTP checks against cluster services.
     """
 
-    # TODO: implement real checks. For now we simply fail to remind authors to
-    # customize the script.
-    raise NotImplementedError("Implement run_checks() for your question")
+    reporter = CheckReporter()
+
+    def placeholder_check() -> None:
+        raise NotImplementedError("Implement run_checks() for your question")
+
+    reporter.check("Placeholder check", placeholder_check)
+    reporter.raise_for_failures()
 
 
 def main(argv: List[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     try:
         run_checks(args)
+    except CheckError as exc:
+        print(f"[ERROR] {exc}")
+        return 1
     except NotImplementedError as exc:  # pragma: no cover - placeholder behavior
         print(f"[ERROR] {exc}")
         return 2
