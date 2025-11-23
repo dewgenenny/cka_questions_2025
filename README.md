@@ -38,3 +38,14 @@ requests following the same conventions.
 - [Audit Log Sidecar Streaming](questions/audit-log-sidecar/README.md)
 - [Web App Ingress Routing](questions/webapp-ingress-routing/README.md)
 - [Nginx DNS Resolver Checks](questions/nginx-dns-resolution/README.md)
+
+## Utility scripts
+
+- `tide_labeler.py` – CLI helper to re-label a tide calendar so that only the
+  strongest spring and neap tides are flagged once per cycle. Use it to clean
+  up CSV exports that incorrectly mark several consecutive days as "spring" or
+  "neap":
+
+  ```bash
+  python tide_labeler.py tides.csv --tolerance 0.1 > tides_corrected.csv
+  ```
